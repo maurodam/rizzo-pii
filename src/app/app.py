@@ -13,7 +13,7 @@ Flusso d'uso:
 Tutto in locale: il testo e il dizionario {placeholder -> valore} non lasciano la macchina.
 
 Il modello e' affiancato da una rete REGEX + CHECKSUM (EMAIL, TELEFONO, IBAN, CF, PIVA,
-carta di credito, importi, targhe, URL). Le entita' validate matematicamente (IBAN/CF/
+carta di credito, importi, targhe, URL, IP). Le entita' validate matematicamente (IBAN/CF/
 PIVA/carta) hanno priorita' sul modello in caso di sovrapposizione.
 
 Il dizionario di ripristino si puo' DISATTIVARE (switch nell'UI, --no-mapping, PII_MAPPING=0):
@@ -59,11 +59,13 @@ from flask import (Flask, jsonify, render_template_string, request,
                    send_from_directory)
 
 import pdf_export
+import pdf_text
 import server_config
 # Rete REGEX + CHECKSUM: modulo a parte, senza dipendenze dal modello. I nomi
 # restano importabili da qui (`app.detect_regex`) per non rompere chi li usa.
 from detectors import (DETECTORS, SOFT_REGEX_LABELS, cf_ok,  # noqa: F401
-                       detect_iban, detect_regex, iban_ok, luhn_ok, piva_ok)
+                       complete_time, detect_iban, detect_regex, iban_ok, luhn_ok,
+                       piva_ok)
 from transformers import pipeline
 
 
@@ -196,19 +198,21 @@ def _page_png(d, n, dpi=PREVIEW_DPI):
     if not (0 <= n < d["n_pages"]):
         return None
     key = (n, dpi)
-    png = d["pages"].get(key)
+    with _DOCS_LOCK:
+        png = d["pages"].get(key)
     if png is None:
         with fitz.open(stream=d["pdf"], filetype="pdf") as doc:
             png = doc.load_page(n).get_pixmap(dpi=dpi).tobytes("png")
-        d["pages"][key] = png
+        with _DOCS_LOCK:
+            d["pages"][key] = png
     return png
 
 
 # --------------------------------------------------------------------------- #
 # Legenda dei tag + tag esclusi dall'anonimizzazione
 #
-# I 22 tag del modello (docs/TASSONOMIA_TAG.md) + URL, che e' solo-regex: il modello
-# non e' stato addestrato su di esso, lo trova la rete regex.
+# I 22 tag del modello (docs/TASSONOMIA_TAG.md) + URL e IPADDR, che sono solo-regex:
+# il modello non e' stato addestrato su di essi, li trova la rete regex.
 # L'utente puo' DESELEZIONARE un tag: le entita' di quel tipo vengono rilevate ma non
 # sostituite (restano in chiaro). Serve a chi deve confrontare gli importi (AMOUNT) o
 # tenere eta'/sesso in un caso clinico.
@@ -228,8 +232,8 @@ TAGS = [
     ("EMAIL", "Email, PEC inclusa", "Email, certified mail included", "m.rossi@studio.it"),
     ("TELEPHONENUM", "Numero di telefono", "Phone number", "+39 333 1234567"),
     ("CF", "Codice fiscale (checksum verificato)", "Italian tax code (checksum verified)",
-     "RSSMRA85H12F205Z"),
-    ("PIVA", "Partita IVA (checksum verificato)", "VAT number (checksum verified)", "12345678901"),
+     "RSSMRA85H12F205Y"),
+    ("PIVA", "Partita IVA (checksum verificato)", "VAT number (checksum verified)", "12345678903"),
     ("ID_DOC", "Numero di documento d'identità (carta, passaporto, patente)",
      "Identity document number (ID card, passport, driving licence)", "CA12345AB"),
     ("IBAN", "IBAN / numero di conto (checksum verificato)",
@@ -246,6 +250,8 @@ TAGS = [
      "Land registry data: sheet, parcel, subordinate", "Foglio 12, part. 345, sub. 6"),
     ("URL", "Indirizzo web (rilevato solo dalla rete regex, non dal modello)",
      "Web address (regex net only, not from the model)", "https://www.studiorossi.it"),
+    ("IPADDR", "Indirizzo IP, anche subnet CIDR o range (rilevato solo dalla rete regex)",
+     "IP address, including CIDR subnet or range (regex net only)", "192.168.1.1"),
 ]
 TAG_NAMES = [t[0] for t in TAGS]
 
@@ -259,6 +265,13 @@ TAG_NAMES = [t[0] for t in TAGS]
 _prefs = server_config.load_prefs()
 EXCLUDED_TAGS = _prefs["excluded_tags"]
 MAPPING_ENABLED = _prefs["mapping_enabled"]
+_PREFS_LOCK = threading.Lock()   # protegge la lettura/scrittura ATOMICA della coppia sopra
+
+
+def _get_prefs():
+    """Snapshot coerente di (excluded_tags, mapping_enabled): mai una POST /settings a meta'."""
+    with _PREFS_LOCK:
+        return EXCLUDED_TAGS, MAPPING_ENABLED
 
 
 # --------------------------------------------------------------------------- #
@@ -410,6 +423,8 @@ def analyze(text, excluded=None, mapping_enabled=True, keep_values=None):
     excluded = set(excluded or ())
     keep = {k for k in (_norm(v) for v in keep_values or ()) if k}
     model_ents, n_chunks = detect_model(text)
+    # il modello taglia i minuti delle ore: la regex dell'ora completa SOLO le sue span TIME
+    complete_time(model_ents, text)
     cands = model_ents + detect_regex(text)
     if excluded:
         cands = [e for e in cands if e["label"] not in excluded]
@@ -514,6 +529,7 @@ def health():
     """Liveness/readiness SENZA inference: sonda economica per orchestratori e sidecar.
     200 = modello caricato e pronto; 503 = server su ma modello non disponibile."""
     ready = nlp is not None
+    excl, mapping = _get_prefs()
     body = {
         "status": "ok" if ready else "loading",
         "model_loaded": ready,
@@ -522,8 +538,8 @@ def health():
         "app_version": APP_VERSION,
         "device": "cuda" if device == 0 else "cpu",
         "tags": len(TAG_NAMES),
-        "excluded_tags": EXCLUDED_TAGS,
-        "mapping_enabled": MAPPING_ENABLED,
+        "excluded_tags": excl,
+        "mapping_enabled": mapping,
     }
     return jsonify(body), (200 if ready else 503)
 
@@ -533,16 +549,35 @@ def _is_pdf(name, data):
 
 
 def _text_from_bytes(name, data):
-    """Testo dai bytes di un upload: PDF via PyMuPDF, .md/.txt come testo puro."""
+    """Testo dai bytes di un upload: PDF via PyMuPDF, .md/.txt come testo puro.
+
+    Per i PDF non basta `page.get_text()`: nei moduli AcroForm il valore sta
+    nei widget (issue #85). `pdf_text.collect_readable_text` allinea
+    l'estrazione a quanto `pdf_export` gia' ispezionava per i residui.
+    """
     name = (name or "").lower()
     ext = os.path.splitext(name)[1]
     if _is_pdf(name, data):
         with fitz.open(stream=data, filetype="pdf") as doc:
-            return "\n".join(page.get_text() for page in doc)
+            # Non solo page.get_text(): nei PDF fillable il valore sta nei
+            # widget AcroForm (issue #85). Stesso contratto di pdf_export.
+            return pdf_text.collect_readable_text(doc)
     if ext in TEXT_EXTS or not ext:
-        for enc in ("utf-8-sig", "utf-16", "latin-1"):
+        # utf-16 solo col BOM: senza, il codec accetta qualunque sequenza di lunghezza pari
+        # e si mangia i .txt a 8 bit. cp1252 prima di latin-1: e' quello che scrivono Word
+        # e il Blocco note italiani, e i due differiscono su euro e virgolette tipografiche.
+        primo = ("utf-16",) if data[:2] in (b"\xff\xfe", b"\xfe\xff") else ()
+        for enc in primo + ("utf-8-sig", "cp1252", "latin-1"):
             try:
-                return data.decode(enc)
+                # Via i byte nulli. Un utf-16 SENZA BOM finisce per forza su una codifica a
+                # 8 bit e il testo esce "M\0a\0r\0i\0o": a schermo non si vede niente (in
+                # HTML il NUL e' invisibile), quindi l'utente legge il documento intero,
+                # non trova segnaposti e conclude che non ci fosse nulla da anonimizzare -
+                # mentre i rilevatori, che lavorano sul testo vero, non trovano niente.
+                # In un utf-16 latino il byte alto e' proprio quello nullo: tolto, il testo
+                # torna esatto e le PII tornano trovabili. Riconoscere l'utf-16 contando i
+                # byte nulli, invece, sbaglia in entrambe le direzioni.
+                return data.decode(enc).replace("\x00", "")
             except UnicodeDecodeError:
                 continue
     raise ValueError(
@@ -592,11 +627,18 @@ def analyze_route():
         return jsonify({"error": str(e)}), 400
 
     # override per-richiesta; senza override vale la configurazione del server
-    excl = server_config.parse_tag_list(raw_excl) if raw_excl is not None else EXCLUDED_TAGS
-    keep_map = (server_config.parse_bool(raw_map, MAPPING_ENABLED)
-                if raw_map is not None else MAPPING_ENABLED)
+    # (snapshot atomico: una POST /settings concorrente non deve far leggere
+    # un tag escluso aggiornato insieme a un mapping_enabled non ancora aggiornato, o viceversa)
+    default_excl, default_map = _get_prefs()
+    excl = server_config.parse_tag_list(raw_excl) if raw_excl is not None else default_excl
+    keep_map = (server_config.parse_bool(raw_map, default_map)
+                if raw_map is not None else default_map)
     out = analyze(text, excl, keep_map, keep_vals)
-    out["source_text"] = text
+    # Il testo originale torna solo col dizionario attivo (l'UI lo rimette nella casella
+    # dopo un upload). In modalita' definitiva la risposta non deve contenere nessun
+    # valore in chiaro: la chiave manca del tutto, come il valore nei segmenti (#118).
+    if keep_map:
+        out["source_text"] = text
     return jsonify(out)
 
 
@@ -671,7 +713,8 @@ def _build_anonymized_pdf():
     stem = os.path.splitext(_safe_name(name, "documento.pdf"))[0] or "documento"
     out_name = f"{stem}_anonimizzato.pdf"
 
-    excl = server_config.parse_tag_list(raw_excl) if raw_excl is not None else EXCLUDED_TAGS
+    excl = (server_config.parse_tag_list(raw_excl) if raw_excl is not None
+            else _get_prefs()[0])
     # mapping_enabled=True e' interno: il risultato non esce da questa funzione.
     res = analyze(text, excl, mapping_enabled=True, keep_values=keep_vals)
     if not res["mapping"]:
@@ -789,10 +832,11 @@ def doc_file(doc_id):
 @app.route("/settings", methods=["GET"])
 @app.route("/tags", methods=["GET"])
 def settings_get():
+    excl, mapping = _get_prefs()
     return jsonify({
         "tags": [{"tag": t, "it": it, "en": en, "example": ex} for t, it, en, ex in TAGS],
-        "excluded_tags": EXCLUDED_TAGS,
-        "mapping_enabled": MAPPING_ENABLED,
+        "excluded_tags": excl,
+        "mapping_enabled": mapping,
         "config_path": str(server_config.prefs_path()),
         "env_override": "PII_EXCLUDE_TAGS" in os.environ or "PII_MAPPING" in os.environ,
     })
@@ -813,8 +857,9 @@ def settings_post():
     if tags is None and mapping is None:
         return jsonify({"error": "Niente da salvare: passa excluded_tags e/o mapping_enabled."}), 400
     saved = server_config.save_prefs(excluded_tags=tags, mapping_enabled=mapping)
-    EXCLUDED_TAGS = saved["excluded_tags"]
-    MAPPING_ENABLED = saved["mapping_enabled"]
+    with _PREFS_LOCK:
+        EXCLUDED_TAGS = saved["excluded_tags"]
+        MAPPING_ENABLED = saved["mapping_enabled"]
     return jsonify({"ok": True, "excluded_tags": EXCLUDED_TAGS,
                     "mapping_enabled": MAPPING_ENABLED})
 
@@ -1906,16 +1951,49 @@ $('dlpdf').onclick=async()=>{
 function reverse(){
   const txt=$('rin').value;
   if(!txt.trim()){toast(tt('t_paste_restore'),false);return;}
-  if(!Object.keys(MAP).length){toast(tt('t_no_dict'),false);return;}
-  // placeholder piu' lunghi prima (evita FULLNAME_1 dentro FULLNAME_10)
-  const keys=Object.keys(MAP).sort((a,b)=>b.length-a.length);
-  let out=txt;
-  for(const ph of keys){
+  const keys=Object.keys(MAP);
+  if(!keys.length){toast(tt('t_no_dict'),false);return;}
+  // Una sola passata sul testo ORIGINALE, non N replace() sequenziali su un
+  // `out` che si accumula: se il valore sostituito per una chiave contenesse
+  // per caso il nome di una chiave successiva (es. una ragione sociale con
+  // dentro "CF_2"), il replace seguente lo ri-sostituiva -- un falso positivo
+  // di secondo ordine che nessuna delle due chiavi, prese da sole, produce.
+  // Il lookup avviene ricostruendo il nome dal testo appena matchato, quindi
+  // l'ordine delle chiavi nella mappa e' ora irrilevante (non serve piu'
+  // ordinare per lunghezza: parentesi TUTTO-O-NIENTE e confine di parola
+  // bastano a evitare che FULLNAME_1 matchi dentro FULLNAME_10, si veda sotto).
+  const byInner=new Map(keys.map(ph=>[ph.slice(1,-1),MAP[ph]]));
+  const alts=keys.map(ph=>{
     const inner=ph.slice(1,-1);                 // FULLNAME_1
-    // tollerante: parentesi opzionali / spazi, eventuale grassetto markdown
-    const rx=new RegExp('\\**\\[?\\s*'+inner.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+'\\s*\\]?\\**','g');
-    out=out.replace(rx,MAP[ph].replace(/\$/g,'$$$$'));
-  }
+    const esc=inner.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
+    // tollerante: parentesi o forma nuda, spazi, eventuale grassetto markdown.
+    // Gli spazi si consumano SOLO insieme alla parentesi: con '\[?\s*' un placeholder
+    // scritto senza parentesi si portava via anche gli spazi intorno, e "Il FULLNAME_1 ha"
+    // tornava "IlMario Rossiha". Con un tab o un a-capo spariva la colonna o la riga.
+    // E le parentesi sono TUTTO-O-NIENTE, con un confine di parola sulla forma nuda:
+    // se ognuna e' opzionale per conto suo, con CF_1 in mappa un indice inventato dal
+    // modello ([CF_12]) matcha per meta' e il ripristino scrive un codice fiscale
+    // SBAGLIATO - un segnaposto rimasto si vede, un valore sbagliato no.
+    // Il confine e' Unicode-aware (specchia _is_word() lato Python, che tratta le
+    // lettere accentate come interne alla parola): \b di JS e' ASCII-only, quindi
+    // su "CF_1e' gia'" non vedeva un confine e il valore tornava incollato alla
+    // lettera accentata -- lo stesso difetto che questa funzione deve evitare,
+    // riaperto in modo asimmetrico solo per le parole italiane.
+    return '\\[\\s*'+esc+'\\s*\\]|(?<![\\p{L}\\p{N}_])'+esc+'(?![\\p{L}\\p{N}_])';
+  }).join('|');
+  // Gli asterischi di grassetto markdown si assorbono in coppie SIMMETRICHE
+  // (stesso numero prima e dopo, fino a 2, col backreference \1): una sequenza
+  // di asterischi condivisa fra due placeholder adiacenti si divide cosi' in
+  // modo deterministico, invece di dipendere da quale chiave viene elaborata
+  // prima (con N pattern separati, un lato mangiava tutta la sequenza e
+  // lasciava l'altro placeholder non risolto o incollato al primo valore).
+  const rx=new RegExp('(\\*{0,2})(?:'+alts+')\\1','gu');
+  const out=txt.replace(rx,(m)=>{
+    const core=m.replace(/^\*+|\*+$/g,'');
+    const br=core.match(/^\[\s*([\s\S]*?)\s*\]$/);
+    const val=byInner.get(br?br[1]:core);
+    return val===undefined?m:val;               // per costruzione sempre trovato
+  });
   const o=$('rout');o.textContent=out;o._raw=out;
   toast(tt('t_restored'));
 }
@@ -1926,8 +2004,16 @@ $('rclear').onclick=()=>{$('rin').value='';$('rout').innerHTML=routEmpty();$('ro
 
 /* ---- carica dizionario da file (per sessioni diverse) ---- */
 $('dictFile').onchange=e=>{const f=e.target.files[0];if(!f)return;
-  const r=new FileReader();r.onload=()=>{try{MAP=JSON.parse(r.result);
-    $('dictInfo').textContent=T[L].dict_loaded_n(Object.keys(MAP).length);
+  const r=new FileReader();r.onload=()=>{try{
+    const parsed=JSON.parse(r.result);
+    const dictKeys=parsed&&typeof parsed==='object'&&!Array.isArray(parsed)?Object.keys(parsed):[];
+    // Un file dizionario corrotto/troncato con una chiave vuota o non testuale
+    // degenera il pattern di reverse() in un match quasi universale e corrompe
+    // l'intero documento al ripristino, non solo un placeholder.
+    const valid=dictKeys.length>0&&dictKeys.every(k=>/^\[.+\]$/.test(k)&&typeof parsed[k]==='string');
+    if(!valid){toast(tt('t_json_invalid'),false);return;}
+    MAP=parsed;
+    $('dictInfo').textContent=T[L].dict_loaded_n(dictKeys.length);
     toast(tt('t_dict_loaded'));}catch{toast(tt('t_json_invalid'),false);}};
   r.readAsText(f);};
 

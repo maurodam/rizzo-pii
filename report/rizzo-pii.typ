@@ -370,8 +370,8 @@ not provide.
 )
 
 #callout("Concrete example")[
-  Take the sentence _"Il Sig. Mario Rossi, C.F. RSSMRA85H12F205Z, P.IVA
-  12345678901, è titolare dell'immobile al Foglio 12, particella 345, sub. 6."_
+  Take the sentence _"Il Sig. Mario Rossi, C.F. RSSMRA85H12F205Y, P.IVA
+  12345678903, è titolare dell'immobile al Foglio 12, particella 345, sub. 6."_
   rizzo-pii tags `FULLNAME`, `CF`, `PIVA` and `CATASTO` and rewrites it as
   _"Il Sig. [FULLNAME_1], C.F. [CF_1], P.IVA [PIVA_1], è titolare dell'immobile
   al [CATASTO_1]."_ A generic English-first model has no label for the
@@ -408,8 +408,8 @@ taxonomy can be changed in one place without re-annotating anything.
     [`PROVINCE`], [Province abbreviation], [MI], [synth],
     [`EMAIL`], [E-mail (incl. PEC)], [m.rossi\@studio.it], [real+synth],
     [`TELEPHONENUM`], [Phone number], [+39 333 1234567], [real+synth],
-    [`CF`], [_Codice fiscale_ (personal tax code)], [RSSMRA85H12F205Z], [synth],
-    [`PIVA`], [_Partita IVA_ (VAT number)], [12345678901], [real+synth],
+    [`CF`], [_Codice fiscale_ (personal tax code)], [RSSMRA85H12F205Y], [synth],
+    [`PIVA`], [_Partita IVA_ (VAT number)], [12345678903], [real+synth],
     [`ID_DOC`], [ID/passport/licence/social number], [CA12345AB], [real+synth],
     [`IBAN`], [IBAN / bank account], [IT60X05428...], [synth],
     [`CREDITCARDNUMBER`], [Credit-card number], [4111 1111 1111 1111], [real],
@@ -805,6 +805,28 @@ still under review:
   Sinatra (\@CapitanJackMarcoS), Massimiliano (\@MassiLLM), Matteo Scortegagna
   (\@Mascorte0), Nicola (\@najmarte), Peppone Peppe (\@Peepp1one), Pietro Bardone
   (\@p3pp01), Raffaele Francesco D'Amato (\@kekkodamato), Yuri (\@D3ros).
+]
+
+// =============================================================================
+#block(breakable: false)[
+= Code contributors
+// =============================================================================
+
+The application, the detectors and the data pipeline improve through pull
+requests on
+#link("https://github.com/Rizzo-AI-Academy/rizzo-pii")[`Rizzo-AI-Academy/rizzo-pii`].
+Everyone who has had a pull request merged is listed here, in alphabetical
+order:
+
+#text(size: 9pt)[
+  Alessio Langiu (\@LangiuAlessio), Andrea M. Piovesana (\@andreampiovesana),
+  Antonio Sarno (\@tonytonycoder11), \@cosmico89, Emanuele Scarlata
+  (\@Fenix46), Fabio Scialanga (\@fabioscialanga), Fabrizio Salmi
+  (\@fabriziosalmi), \@FrankTheRope, \@Lazza003, \@marco88cappelli,
+  \@marcomodonesi, Massimo Fontana (\@maxxflyer), Nicholas Angelucci
+  (\@nicholas1990), \@pieronoviello, Quirino Zagarese (\@qzagarese), Roberto
+  (\@not-knope), Salvatore Arena (\@Fanfulla), \@Umberto65UT.
+]
 ]
 
 #v(4pt)

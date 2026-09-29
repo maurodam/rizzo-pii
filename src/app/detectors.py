@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Rete REGEX + CHECKSUM che affianca il modello (EMAIL, TELEFONO, IBAN, CF, PIVA,
-carta di credito, importo, targa, URL).
+carta di credito, importo, targa, URL, indirizzo IP).
 
 Come `pdf_export`, questo modulo lavora solo su stringhe: nessun import di
 torch/transformers/fitz, quindi e' testabile in isolamento e senza il modello.
@@ -16,6 +16,7 @@ checksum non viene nemmeno interrogato e, dove `strict=True`, il valore resta
 in chiaro senza alcun fallback.
 """
 
+import bisect
 import re
 
 
@@ -159,6 +160,24 @@ DETECTORS = [
                 r"(?:it|com|net|org|eu|info|io|dev|app|gov|edu|cloud|online|site|blog)"
                 r"\b(?:/[^\s<>\"']*)?", re.IGNORECASE),
      None, True),
+    # IPADDR: quattro ottetti 0-255 separati da punto. Il vincolo sull'ottetto (non
+    # un \d{1,3} generico) e' cio' che tiene fuori le versioni software tipo "2.3.55.987":
+    # 987 non e' un ottetto valido, quindi l'intera stringa non matcha come IP.
+    # Copre anche le due notazioni con cui un IP compare in un log/config:
+    #   - CIDR:   192.168.1.0/24        (prefisso 0-32)
+    #   - range:  192.168.1.1-192.168.1.20
+    # Resta un limite noto (non risolvibile a regex, lo segnala anche l'issue): una
+    # versione software con tutti gli ottetti per caso <= 255 (es. "1.2.3.4") e'
+    # indistinguibile da un IP vero. Nessun falso negativo pero' sulle versioni con
+    # un numero fuori range, che sono la stragrande maggioranza dei casi reali.
+    ("IPADDR",
+     re.compile(r"\b(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)"
+                r"(?:\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}"
+                r"(?:/(?:3[0-2]|[12]?\d))?"
+                r"(?:\s*-\s*(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)"
+                r"(?:\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3})?"
+                r"\b"),
+     None, True),
     # DOCID: il codice di un atto e' scritto sempre dopo la sua sigla ("R.G. 1234/2024",
     # "Prot. 123/2024", "Rep. 45"). E' la sigla a renderlo riconoscibile: il numero da
     # solo ("1234/2024") non si distingue da una frazione o da un articolo di legge,
@@ -267,6 +286,38 @@ def detect_iban(text):
     return [e for e in ents if e["end"] > e["start"]]
 
 
+# Dalla piu' lunga: le stesse lunghezze che accetta luhn_ok, cosi' un PAN non viene
+# tagliato a una lunghezza piu' corta che passa il Luhn per caso (con 17 fuori dalla
+# lista, di un PAN di 17 cifre se ne coprivano 16 e l'ultima restava in chiaro).
+_CARD_LEN = (19, 18, 17, 16, 15, 14, 13)
+_CARD_CODA = 4                     # cifre di coda ammesse: la scadenza, "12/26" o "12 26"
+
+
+def _card_scadenza(coda):
+    """La coda deve somigliare a una scadenza: due-quattro cifre, col mese fra 1 e 12.
+    E' il vincolo che tiene bassi i falsi positivi: senza, un numero lungo qualsiasi
+    trova per caso un prefisso che passa il Luhn. Una sola cifra non e' mai una
+    scadenza, e ammetterla faceva passare 9 code su 10."""
+    return 2 <= len(coda) <= 4 and 1 <= int(coda[:2]) <= 12
+
+
+def _card_senza_scadenza(text, start, end):
+    """La scadenza attaccata al numero ("4111 1111 1111 1111 12/26") entra nel match:
+    il Luhn fallisce, strict lo scarta e la carta resta IN CHIARO. Qui si riprova
+    tagliando la coda, ma solo su un separatore gia' presente e solo se quel che resta
+    fuori e' un mese plausibile."""
+    s = text[start:end]
+    d = [i for i, c in enumerate(s) if c.isdigit()]
+    for n in _CARD_LEN:
+        if not 0 < len(d) - n <= _CARD_CODA:
+            continue
+        taglio = d[n - 1] + 1
+        if (s[taglio] in " .-" and _card_scadenza(re.sub(r"\D", "", s[taglio:]))
+                and luhn_ok(s[:taglio])):
+            return start + taglio, True
+    return end, False
+
+
 def detect_regex(text):
     """Entita' della rete regex. validated=True solo quando il checksum passa."""
     ents = detect_iban(text)
@@ -279,6 +330,8 @@ def detect_regex(text):
                 if end <= start:
                     continue
             ok = validator(m.group(0)) if validator else False
+            if not ok and label == "CREDITCARDNUMBER":
+                end, ok = _card_senza_scadenza(text, start, end)
             if validator and strict and not ok:
                 continue
             ents.append({
@@ -292,3 +345,38 @@ def detect_regex(text):
     return ents
 
 
+# ORA: il modello taglia i minuti ("09:50" -> "09:", "18:28" -> "18") e la meta' che
+# resta finisce in chiaro accanto al placeholder: "ore 18[TIME_1]28".
+# La regex NON gira da sola sul testo: due numeri separati da due punti sono anche una
+# scala catastale ("1:25"), un versetto ("Giovanni 3:16"), una coordinata; col punto,
+# una versione ("1.30") o un importo ("euro 10.30"). Parte solo DOVE IL MODELLO HA GIA'
+# VISTO UN'ORA, e serve a completarne i confini. Il contesto lo porta il modello, la
+# regex porta la forma esatta: cosi' si puo' accettare anche il punto ("ore 18.30").
+# Guardie: niente cifra, ne' "cifra+separatore", subito prima o subito dopo. Tengono
+# fuori i pezzi di "15.03.2026" o di "1.2.30.4", ma lasciano passare l'intervallo col
+# trattino attaccato ("9:00-12:30").
+_TIME_RX = re.compile(r"(?<!\d)(?<!\d[.:])(?:[01]?\d|2[0-3])[:.][0-5]\d(?:[:.][0-5]\d)?"
+                      r"(?!\d)(?![.:]\d)")
+
+
+def complete_time(ents, text):
+    """Estende le span TIME DEL MODELLO all'ora intera che le contiene o le tocca.
+
+    Solo allargamenti: una span del modello non si restringe mai e non ne nasce una
+    nuova dove il modello non ha visto un'ora. Un'ora che il modello non trova affatto
+    resta quindi al modello (e' il prezzo di non mascherare "Scala 1:25").
+    Le entita' vengono modificate sul posto; ritorna la stessa lista."""
+    anchors = [e for e in ents if e["label"] == "TIME"]
+    if not anchors:
+        return ents
+    spans = [(m.start(), m.end()) for m in _TIME_RX.finditer(text)]
+    starts = [s for s, _ in spans]
+    for e in anchors:
+        # i match non si sovrappongono: quelli che toccano la span sono gli ultimi che
+        # iniziano prima della sua fine, e si trovano risalendo da bisect.
+        j = bisect.bisect_left(starts, e["end"]) - 1
+        while j >= 0 and spans[j][1] > e["start"]:
+            e["start"] = min(e["start"], spans[j][0])
+            e["end"] = max(e["end"], spans[j][1])
+            j -= 1
+    return ents

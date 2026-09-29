@@ -148,7 +148,7 @@ The differentiators are **Italian-legal coverage**, a **smaller memory footprint
 **checksum-backed safety net** (mod-97 for IBAN, Luhn for cards, the official CF/PIVA algorithms)
 that the larger generic models do not provide.
 
-> **Concrete example.** Take *"Il Sig. Mario Rossi, C.F. RSSMRA85H12F205Z, P.IVA 12345678901, è
+> **Concrete example.** Take *"Il Sig. Mario Rossi, C.F. RSSMRA85H12F205Y, P.IVA 12345678903, è
 > titolare dell'immobile al Foglio 12, particella 345, sub. 6."* rizzo-pii tags `FULLNAME`, `CF`,
 > `PIVA` and `CATASTO` and rewrites it as *"Il Sig. [FULLNAME_1], C.F. [CF_1], P.IVA [PIVA_1], è
 > titolare dell'immobile al [CATASTO_1]."* A generic English-first model has no label for the
@@ -178,8 +178,8 @@ re-annotating anything. Details in **[docs/TASSONOMIA_TAG.md](docs/TASSONOMIA_TA
 | `PROVINCE` | Province abbreviation | MI | synth |
 | `EMAIL` | E-mail (incl. PEC) | m.rossi@studio.it | real+synth |
 | `TELEPHONENUM` | Phone number | +39 333 1234567 | real+synth |
-| `CF` | Codice fiscale (personal tax code) | RSSMRA85H12F205Z | synth |
-| `PIVA` | Partita IVA (VAT number) | 12345678901 | real+synth |
+| `CF` | Codice fiscale (personal tax code) | RSSMRA85H12F205Y | synth |
+| `PIVA` | Partita IVA (VAT number) | 12345678903 | real+synth |
 | `ID_DOC` | ID / passport / licence / social number | CA12345AB | real+synth |
 | `IBAN` | IBAN / bank account | IT60X05428… | synth |
 | `CREDITCARDNUMBER` | Credit-card number | 4111 1111 1111 1111 | real |
@@ -388,7 +388,7 @@ Whichever way you started it, the process is a plain HTTP service — see
 ```bash
 curl localhost:5005/health                      # 200 = model loaded and ready
 curl -X POST localhost:5005/analyze -H 'Content-Type: application/json' \
-     -d '{"text": "Mario Rossi, CF RSSMRA85M01H501Z"}'
+     -d '{"text": "Mario Rossi, CF RSSMRA85M01H501Q"}'
 ```
 
 ---
@@ -697,6 +697,32 @@ Vincoli: SOLO dati sintetici (mai PII reali). Se Gemini non è disponibile, ferm
 | [docs/BUILD.md](docs/BUILD.md) | Desktop executable build (CPU, Windows) |
 | [docs/CHANGELOG.md](docs/CHANGELOG.md) | Change log for the pipeline, with rationale |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | How to contribute code, docs and (above all) data |
+
+## Contributors
+
+Thanks to everyone who has had a pull request merged into this repository, in alphabetical order:
+
+[Alessio Langiu](https://github.com/LangiuAlessio) ·
+[Andrea M. Piovesana](https://github.com/andreampiovesana) ·
+[Antonio Sarno](https://github.com/tonytonycoder11) ·
+[@cosmico89](https://github.com/cosmico89) ·
+[Emanuele Scarlata](https://github.com/Fenix46) ·
+[Fabio Scialanga](https://github.com/fabioscialanga) ·
+[Fabrizio Salmi](https://github.com/fabriziosalmi) ·
+[@FrankTheRope](https://github.com/FrankTheRope) ·
+[@Lazza003](https://github.com/Lazza003) ·
+[@marco88cappelli](https://github.com/marco88cappelli) ·
+[@marcomodonesi](https://github.com/marcomodonesi) ·
+[Massimo Fontana](https://github.com/maxxflyer) ·
+[Nicholas Angelucci](https://github.com/nicholas1990) ·
+[@pieronoviello](https://github.com/pieronoviello) ·
+[Quirino Zagarese](https://github.com/qzagarese) ·
+[Roberto](https://github.com/not-knope) ·
+[Salvatore Arena](https://github.com/Fanfulla) ·
+[@Umberto65UT](https://github.com/Umberto65UT)
+
+The people who contributed **data** to the community dataset are listed in the
+[technical report](report/rizzo-pii-report.pdf), under *Dataset contributors*.
 
 ## License
 

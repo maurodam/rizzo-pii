@@ -20,6 +20,75 @@ troppo largo. Ora ogni voce della tabella del **Dizionario reversibile** ha il p
   così i placeholder del PDF coincidono con quelli a video.
 - Con il **dizionario disattivato** non si può: la risposta non contiene i valori, per scelta.
 - Test: `tests/test_keep_values.py`.
+## 2026-09-01 — PDF fillable: i campi modulo entrano in `/analyze` (`pdf_text.py`)
+
+`_text_from_bytes` leggeva solo `page.get_text()`. Nei PDF con AcroForm (moduli
+pagoPA, dichiarazioni compilabili) il valore sta nel widget, non nel content
+stream: l'estrazione tornava vuota e `POST /analyze` rispondeva 400
+"Nessun testo da analizzare" (issue #85, secondo punto).
+
+`pdf_export._readable_text` gia' raccoglieva widget, annotazioni e segnalibri,
+ma solo *dopo* l'analisi, per i residui. La stessa raccolta e' ora in
+`src/app/pdf_text.py` (niente fitz/torch: testabile in CI) e la usano sia
+l'estrazione per `/analyze`/`/preview` sia la verifica residui.
+
+Non risolve il primo punto della issue (FULLNAME spezzato su campi Nome/Cognome):
+quello e' un limite del modello, non dell'estrazione.
+## 2026-09-10 — `reverse()`: confine di parola ASCII, asterischi condivisi, sostituzione di secondo ordine (`app.py`)
+
+Review indipendente della riga toccata il 2026-08-04, con cinque difetti concreti trovati e
+riprodotti prima di toccare il codice:
+
+- **`\b` di JS è ASCII-only**: su un placeholder senza parentesi incollato a una lettera
+  accentata (`CF_1è`) il confine di parola non scattava, e il valore tornava incollato al
+  testo — esattamente il difetto già chiuso ad agosto, riaperto in modo asimmetrico sulle
+  parole italiane. Il caso ASCII (`ilCF_1`) restava correttamente intatto: la guardia era
+  asimmetrica.
+- **asterischi di grassetto condivisi fra due placeholder adiacenti** (`**CF_1****CF_2**`)
+  davano un esito diverso a seconda di quale chiave veniva elaborata prima nel ciclo:
+  un placeholder finiva corrotto o non risolto.
+- lo stesso `\**` avido mangiava grassetto markdown **non correlato** al placeholder quando
+  lo toccava senza separatore.
+- una chiave vuota o non testuale in un file dizionario caricato (nessuna validazione)
+  degenerava il pattern in un match quasi universale e corrompeva l'intero documento, non
+  solo un placeholder.
+- il ciclo sostituiva le chiavi una alla volta su un `out` che si riaccumulava: se il valore
+  di una chiave conteneva per coincidenza il nome di una chiave successiva (es. una ragione
+  sociale con dentro `CF_2`), il replace seguente lo ri-sostituiva — un falso positivo di
+  secondo ordine che nessuna delle due chiavi, presa da sola, produce.
+
+Il fix sostituisce il ciclo per-chiave con **una sola passata** sul testo originale: un
+pattern con alternanza su tutte le chiavi, confine di parola Unicode-aware (specchia
+`_is_word()` lato Python, che tratta le lettere accentate come interne alla parola), e
+asterischi assorbiti in coppie **simmetriche** (stesso numero prima e dopo, via
+backreference) invece che avidamente. Una singola passata sul testo originale chiude anche
+la sostituzione di secondo ordine per costruzione: il valore sostituito non viene mai
+ri-scandito. Il caricamento del dizionario ora rifiuta un file le cui chiavi non siano tutte
+`[NOME]` con valore stringa.
+
+Un placeholder incollato a una lettera accentata resta ora **non risolto e visibile**,
+simmetrico al caso ASCII già corretto — coerente col principio tutto-o-niente di questa
+funzione ("un segnaposto rimasto si vede, un valore sbagliato no"). Il caso della parentesi
+orfana (`CF_1]`, e ora anche `[[CF_1]]`) resta **invariato**: il valore torna, la parentesi
+in più resta visibile invece di essere assorbita — stesso trade-off già accettato ad agosto.
+
+Verificato con la `reverse()` vera estratta dal file (`tests/test_ripristino_placeholder.py`,
+nuovo — prima non esisteva nessun test per questa funzione) più un confronto diretto
+vecchio-vs-nuovo su 20.000 documenti generati con le sole forme legittime: **zero
+differenze**.
+## 2026-08-20 — `/tags`: gli esempi CF e PIVA ora passano il proprio checksum
+
+Gli esempi mostrati da `/tags`/`/settings` per `CF` (`RSSMRA85H12F205Z`) e `PIVA`
+(`12345678901`) erano etichettati "checksum verificato" ma non passavano `cf_ok()`/`piva_ok()`
+in `src/app/detectors.py`. Chi li usava per un primo test di `/analyze` (come in [issue #89](
+https://github.com/Rizzo-AI-Academy/rizzo-pii/issues/89)) vedeva sempre `validated: false` e
+concludeva che la validazione fosse rotta — non lo era, era solo l'esempio a essere sbagliato
+(`IBAN`, il cui esempio *è* valido, tornava `validated: true` sulla stessa richiesta).
+Sostituiti con `RSSMRA85H12F205Y` (CF) e `12345678903` (PIVA), gli stessi valori usati dalla
+PR #36 per i corrispondenti esempi in `README.md`/`docs/`, così l'esempio nell'API live e
+quello nella documentazione restano lo stesso codice fiscale.
+
+---
 
 ## 2026-08-07 — `Dockerfile`: l'app come webapp in un container
 
@@ -50,6 +119,263 @@ Scelte che contano:
 `Dockerfile.linux` resta quello che era: l'ambiente di **build** dei bundle .deb/AppImage, non
 un modo di far girare l'app. Il `.dockerignore` ora riammette `src/app/` (era `*`, pensato per
 il contesto vuoto di `Dockerfile.linux`, che infatti non fa nessun `COPY`).
+## 2026-08-04 — Un file di testo veniva letto con la codifica sbagliata (`app.py`)
+
+`_text_from_bytes()` provava le codifiche in ordine `utf-8-sig`, `utf-16`, `latin-1`. Ma il
+codec `utf-16` **senza BOM accetta qualunque sequenza di lunghezza pari**: un `.txt` o un `.md`
+in latin-1 con un numero pari di byte non arrivava mai al terzo tentativo.
+
+    vero   : "Nicolò: Con atto di citazione l'avvocato Susanna Grassi, nell'interesse..."
+    letto  : "楎潣›潃⁮瑡潴搠⁩楣慴楺湯⁥❬癡潶慣潴匠獵湡慮䜠慲獳Ⱪ渠汥❬湩整敲獳..."
+
+Non è un difetto cosmetico: su un file letto così i rilevatori trovano **zero** entità. Il
+documento non viene anonimizzato, viene reso illeggibile.
+
+Ma anche `utf-8` accetta troppo: il **byte nullo** è un carattere legittimo, quindi in testa
+alla catena si prende gli `utf-16` di testo ASCII e li rende mojibake allo stesso modo. Nessuno
+dei due codec può fare da guardia all'altro.
+
+Il rimedio non è indovinare la codifica: è **togliere i byte nulli dal testo restituito**.
+In un utf-16 latino il byte alto è proprio quello nullo, quindi un file finito su una
+codifica a 8 bit esce `M\0a\0r\0i\0o` — e tolti i nulli il testo torna **esatto**, con le
+PII di nuovo trovabili. Vale anche per i file misti: la parte cinese o greca resta sporca,
+ma il corpo italiano con le PII no.
+
+Riconoscere l'utf-16 contando i byte nulli, invece, sbaglia in entrambe le direzioni, e le
+due versioni che ci ho provato erano **peggio di `main`**: un utf-16 con dentro del cinese
+ne ha pochi e resta mojibake, un file con la testa azzerata ne ha tanti e viene distrutto,
+e una tabella disegnata a cornice (`─`, U+2500) ne ha abbastanza su entrambe le parità da
+mandare in stallo qualunque soglia.
+
+Resta il resto della catena: `utf-16` solo col BOM, e `cp1252` prima di `latin-1` — è quello
+che scrivono Word e il Blocco note italiani, e i due differiscono su euro e virgolette
+tipografiche.
+
+Su 300 atti sintetici, metà con accenti italiani (`letto male` = il round-trip fallisce):
+
+| codifica del file caricato | prima | dopo |
+|---|---:|---:|
+| utf-8, utf-8 col BOM, utf-16 col BOM | 0 | **0** |
+| cp1252 (Windows italiano) | 30,7% | **0** |
+| latin-1 | 30,7% | **0** |
+| **utf-16-le senza BOM** | 50,0% | **0** |
+| **utf-16-be senza BOM** | 100% | **0** |
+
+Su questo corpus `latin-1` e `cp1252` coincidono, perché gli accenti italiani hanno gli stessi
+byte nelle due codifiche: a distinguerle sono l'euro e le virgolette tipografiche, e lì `main`
+sbaglia dove ora si legge bene.
+
+Il metro giusto però non è il round-trip, è **se le PII restano trovabili**. Su 36 file
+costruiti apposta (utf-16 LE e BE di varie lunghezze, bilingui con intestazione cinese, thai
+e a cornice, file a 8 bit con NUL vaganti, teste azzerate, export a record NUL-terminati,
+blob binari, degeneri), contando i casi in cui il testo resta leggibile a schermo ma i
+rilevatori non trovano più nulla — cioè il documento esce in chiaro e l'utente non se ne
+accorge:
+
+| | casi "falso pulito" | PII trovata |
+|---|---:|---:|
+| main | 8 | 17 |
+| dopo | **0** | **30** |
+
+`tests/test_codifiche.py` ritaglia la funzione vera dal sorgente con `ast` — `app.py` non è
+importabile senza torch — e misura la **trovabilità della PII**, non solo il round-trip: utf-16
+senza BOM, contorni non latini, NUL vaganti, teste azzerate, degeneri. Sul codice di `main`
+**4 dei 6 falliscono**.
+## 2026-08-04 — La carta con la scadenza attaccata restava in chiaro (`detectors.py`)
+
+Il modo normale di scrivere una carta è numero **e scadenza di seguito**. Il detector
+`CREDITCARDNUMBER` è avido e ingloba il mese, il Luhn fallisce sulla sequenza allungata, e
+`strict=True` scarta tutto: il numero resta **in chiaro** nel documento anonimizzato.
+
+    'Carta 4111 1111 1111 1111 12/26'  ->  nessun match
+    'PAN 4111-1111-1111-1111 12/26'    ->  nessun match
+    'Carta 4111 1111 1111 1111 scadenza 12/26'  ->  trovata (basta una parola in mezzo)
+
+Quando il Luhn fallisce si riprova tagliando la coda, con tre vincoli che la tengono stretta:
+il taglio deve cadere su un **separatore già presente**, quel che resta fuori dev'essere fra
+**due e quattro cifre**, e deve **somigliare a una scadenza** (mese fra 1 e 12). Le lunghezze
+provate, dalla più lunga, sono le stesse che accetta `luhn_ok` (19…13): se la lista si ferma
+prima, di un PAN di 17 cifre se ne coprono 16 e l'ultima resta leggibile **accanto al
+segnaposto**, che è peggio di non mascherare affatto.
+
+Il minimo di due cifre non è un dettaglio: una cifra sola supera «mese fra 1 e 12» nove volte
+su dieci, e da sola faceva quasi raddoppiare i falsi positivi sui numeri di 17 cifre.
+
+Misure su PAN **sintetici** col Luhn calcolato apposta: 8.400 numeri, lunghezze da 13 a 19,
+tre spaziature (compatta, spazi, trattini), quattro code (`12/26`, `12 26`, `1226`, `03/28`).
+
+| | main | dopo |
+|---|---:|---:|
+| PAN con la scadenza attaccata, in chiaro | 65,8% (5.524/8.400) | **0** |
+| PAN **senza** scadenza attaccata, in chiaro (controllo) | 0 | **0** |
+| falsi positivi, 16 cifre + 1 (15.000 numeri di pratica) | 9,79% | **9,79%** |
+| falsi positivi, 16 cifre + 2 | 9,70% | 10,97% |
+| falsi positivi, 16 cifre + 3 | 10,27% | 11,40% |
+| match su **120.911 testi reali** (Ai4Privacy) | 891 | **891, span identiche** |
+
+Sul corpus reale non cambia niente: stesse 891 span, **zero differenze** su 120.911 testi. Il
+costo si paga solo dove il Luhn ha già fallito, quindi sulla prosa è nel rumore; su un documento
+fitto di numeri lunghi (estratto conto, tabulato) è dell'ordine del 20%, non zero.
+
+`tests/test_carta_scadenza.py` copre i due modi di sbagliare del taglio; due dei cinque test
+falliscono su `main`.
+
+---
+
+## 2026-08-04 — L'ora perdeva i minuti (`detectors.py`)
+
+`TIME` è il tag più debole della valutazione indipendente della issue #18 (69,4%). Il modello
+**taglia i minuti** e la metà che resta finisce in chiaro accanto al placeholder:
+
+    'Ingresso ore 18:28, uscita ore 19:30.'  ->  'Ingresso ore [TIME_1], uscita ore 18[TIME_2]30.'
+
+La forma dell'ora è chiusa (0-23, due punti o punto, 0-59, secondi opzionali) e si presta a una
+regex deterministica. **Ma la regex non gira da sola sul testo**: `complete_time()` parte solo
+dalle span `TIME` che il **modello** ha già trovato, e le allarga all'ora intera che le contiene
+o le tocca. Il contesto ("è un'ora") lo porta il modello, la regex porta i confini esatti.
+
+Perché ancorata e non una voce in più della rete regex (la prima stesura della PR #69):
+
+- **niente falsi positivi senza contesto**. Da sola la regex mascherava 6 frasi su 16 senza
+  alcuna ora: scale catastali (`Scala 1:25`), versetti (`Giovanni 3:16`), riferimenti
+  (`normativa 4:12`), coordinate sessagesimali;
+- **si può accettare il punto** (`ore 18.30`), che da sola la regex doveva rifiutare perché ha
+  la stessa forma di `versione 1.30` o `euro 10.30`;
+- **nessun conflitto con le date**: nel timestamp ISO (`2026-03-15T10:30:00`) il modello
+  marca tutto come `DATE`, non c'è nessun `TIME` da completare e la span non viene toccata.
+  Non serve più mettere `TIME` in `SOFT_REGEX_LABELS`;
+- l'intervallo col trattino attaccato (`9:00-12:30`) ora si riconosce: le guardie escludono
+  solo "cifra" e "cifra + separatore" ai lati, non il trattino.
+
+Solo allargamenti: una span del modello non si restringe mai e non ne nasce una nuova. Il
+prezzo, dichiarato: un'ora che il modello non vede affatto resta scoperta come prima.
+
+`tests/test_ora.py` copre i minuti tagliati a destra e a sinistra, i secondi, il punto,
+l'intervallo, le frasi senza ora (nessun match senza il modello), i pezzi di data, le ore fuori
+scala, la `DATE` ISO del modello e — con `app.py` importabile — `analyze()` con un modello finto
+che taglia i minuti.
+
+---
+
+## 2026-08-04 — Il ripristino incollava le parole fra loro (`app.py`)
+
+`reverse()` accetta il placeholder anche **senza parentesi** — l'LLM a volte le toglie — ma la
+regex era `\[?\s*NOME\s*\]?`: senza parentesi lo `\s*` si portava via anche gli spazi
+**intorno**, e il testo ripristinato tornava con le parole attaccate.
+
+    'Il FULLNAME_1 ha firmato.'  ->  'IlMario Rossiha firmato.'
+    'col1	FULLNAME_1	col3'     ->  'col1Mario Rossicol3'   (la tabella perde le colonne)
+    'riga
+FULLNAME_1
+riga'     ->  'rigaMario Rossiriga'   (e il testo perde le righe)
+
+La stessa riga aveva un **secondo difetto, peggiore**, segnalato in review da @LangiuAlessio:
+con ogni parentesi opzionale per conto suo, un indice che il modello **si inventa** matchava a
+metà. Con `CF_1` in mappa e `[CF_12]` nella risposta, il ripristino scriveva
+`RSSMRA78S03L750K2]`: non un segnaposto saltato — quello si vede — ma un **codice fiscale
+sbagliato scritto con sicurezza**.
+
+La forma finale chiude entrambi: `(?:\[\s*NOME\s*\]|\bNOME\b)`. Gli spazi si consumano **solo
+dentro le parentesi**, le parentesi ci sono **entrambe o nessuna**, e la forma nuda ha i
+confini di parola — così anche `CF_1a` e `ilCF_1` (suffisso o prefisso incollati) restano
+com'erano invece di diventare valori.
+
+Eseguendo la `reverse()` vera, presa dal file prima e dopo, su una matrice di casi (parentesi
+presenti, assenti, grassetto markdown, spazi dentro, a-capo e tab intorno, `_1` accanto a
+`_10`, indici inventati con e senza parentesi, valori con `$` e con quadre) più 20.000
+documenti generati con le sole forme legittime: **le forme legittime escono identiche, gli
+indici inventati restano intatti**. Unico cambio voluto: con mezza parentesi (`CF_1]`) il
+valore torna ma la parentesi orfana resta **visibile** invece di essere assorbita.
+## 2026-08-05 — Il riavvio cancellava il log dell'avvio fallito (`serve.py`)
+
+Quando il backend non parte, lo splash di Tauri scrive *"Vedi il log in
+`%LOCALAPPDATA%\rizzo-pii\backend.log`"* (`lib.rs`). Ma `serve.py` apriva quel file in
+**troncamento** (`"w"`), e il sidecar viene rilanciato: da `retry_backend`, o dall'utente
+che riapre l'app per riprodurre il problema. Il rilancio azzerava il log dell'avvio
+fallito — cioè esattamente quello che il messaggio chiede di andare a leggere. Il lato
+Rust (`tlog`) scrive già in append: fuori linea era solo il lato Python.
+
+Ora il log è in **append**, con un'intestazione datata per avvio (`===== avvio … (pid …)`)
+per distinguere le sessioni, e rotazione su `backend.log.1` oltre 1 MB.
+
+Il controllo della dimensione avviene **solo all'avvio**, quindi non è un tetto sulla singola
+sessione: un backend che gira a lungo scrive quanto vuole. È il ripetersi degli avvii a restare
+limitato — 60 avvii da 60 KB (3,6 MB scritti) lasciano 1,56 MB su disco. Nota che `main`,
+troncando ogni volta, teneva al massimo una sessione; così ne tiene due.
+
+Dopo una rotazione il log fresco dice dove è finito il precedente. Serve: lo splash manda
+l'utente su `backend.log`, e senza quella riga chi arriva subito dopo il superamento della
+soglia non trova la traccia dell'avvio fallito, che la rotazione ha appena spostato in `.1`.
+
+La rotazione è in un `try` suo: se `os.replace` non riesce si accoda al file esistente senza
+perdere niente. Su Windows questo copre anche il caso di un'altra istanza che tiene il file
+aperto (sharing violation); su Linux e macOS `rename` ignora i descrittori aperti, quindi lì la
+rotazione riesce comunque e l'istanza già in esecuzione continua a scrivere sull'inode che ora
+si chiama `.1`.
+
+`tests/test_log_backend.py` (5 test) esegue il **preambolo vero** ritagliato da `serve.py`
+in un `LOCALAPPDATA` usa e getta — il file non è importabile, a import time carica il
+modello. Sul codice di `main` **3 dei 5 falliscono**.
+## 2026-08-04 — Anche `hard_split()` era quadratica (`pdf_export.py`)
+
+`text_to_pdf()` impagina il testo anonimizzato quando l'input non è un PDF (incolla, `.md`,
+`.txt`). `hard_split()` spezza le "parole" più larghe della riga e a **ogni giro** misurava e
+ricopiava tutta la stringa residua: O(n²) sulla lunghezza della parola. Basta una riga senza
+spazi — un JSON incollato, un base64, una riga di tabella con i soli tab — perché "Scarica PDF
+anonimizzato" diventi inutilizzabile.
+
+Le due colonne sono misurate **nello stesso giro sulla stessa macchina**, mediana di 3; conta
+il rapporto, non i secondi assoluti, e cresce con la lunghezza perché la vecchia è quadratica:
+
+| caratteri di una parola | prima | dopo | |
+|---:|---:|---:|---:|
+| 2.000 | 0,18 s | **0,070 s** | 3x |
+| 8.000 | 3,75 s | **0,434 s** | 9x |
+| 16.000 | 14,36 s | **0,915 s** | 16x |
+| 32.000 | 60,44 s | **1,76 s** | 34x |
+| 128.000 | ~16 min (estrapolata dalla curva) | **7,25 s** | |
+| 1.000.000 | — | **73 s** | |
+
+In una riga larga `width` non entrano più di `cap` caratteri qualunque essi siano: oltre quel
+punto non c'è niente da misurare. Si lavora su un prefisso lungo `cap` e si avanza con un
+indice invece di ricopiare la coda. Sul testo normale si esce dopo una sola misura, come prima:
+lo scarto misurato sta dentro la banda di rumore del banco, che con **lo stesso codice nei due
+bracci** dà +8,4%.
+
+`cap` si ricava dal glifo **più stretto** del repertorio, non da `"l"`. Il testo è già forzato
+in latin-1 poche righe sopra, quindi il repertorio è chiuso e il minimo si misura (191 chiamate,
+0,8 ms una volta per documento). Con `"l"` il conto sbagliava per difetto: in helv l'apostrofo
+misura 2,0055 pt a corpo 10,5 contro i 2,331 di `"l"`, quindi `cap` valeva 209 dove in colonna
+ne entrano 240 — una parola di apostrofi stava dentro la finestra, il ciclo usciva subito e
+accodava tutta la coda su **una riga sola**, larga fino a 2.022 pt su una colonna di 483 in una
+pagina di 595. I caratteri oltre il bordo sparivano dal PDF scaricato senza nessun errore: su
+300 apostrofi se ne rileggevano 269.
+
+Comportamento identico a prima, verificato sulla `text_to_pdf()` vera confrontando il **testo
+estratto** dai due PDF (i byte non sono confrontabili, l'`/ID` è casuale): 444 casi in 11
+alfabeti, compresi quelli dominati dal glifo più stretto, **0 differenze** e **0 righe fuori
+pagina**. `tests/test_pdf_hard_split.py` copre il caso, e con il `cap` calibrato su `"l"`
+fallisce. `smoke_pdf_export.py` 23/23 PASS.
+## 2026-08-04 — Un modello lento interrompeva la generazione dei template (`llm_template_bank.py`)
+
+Il timeout di lettura di `urllib` scade **dentro** `getresponse()` e solleva `TimeoutError`,
+che deriva da `OSError` e **non** da `urllib.error.URLError`. I due `except` intercettavano
+`(urllib.error.URLError, KeyError, IndexError)`: una singola generazione lenta — normale con
+un modello locale su CPU o molto quantizzato — non consumava un tentativo, propagava e
+fermava tutta l'esecuzione, buttando i template già scritti.
+
+Segnalato da **@p3pp01** con Gemma servito da Ollama, sulla PR #20.
+
+Ora si intercetta `OSError`, che è la classe base sia di `URLError` sia di `TimeoutError`, e
+copre per giunta la connessione rifiutata quando il server locale non è avviato. Il messaggio
+d'errore stampa anche il tipo dell'eccezione, che era l'informazione che mancava per capirlo.
+
+Test: `tests/test_backend_llm_timeout.py` sostituisce `urlopen` con quattro errori di rete
+(timeout, timeout come `OSError`, connessione rifiutata, host irraggiungibile) e verifica che
+la chiamata **ritorni `None`** invece di propagare, su entrambi i backend e su `call_llm()`.
+Senza la correzione i test danno 7 errori.
+
+---
 
 ## 2026-08-03 — `_merge()` era quadratica: 100 s su un documento lungo (`app.py`)
 
@@ -458,6 +784,22 @@ Motivazione: consentono di **arricchire il pool offline da 25 a 85 template senz
 `MIXEDLIST` e `PROVINCE`) per mitigare l'overfit strutturale sui tag IT-legali rari
 (`CATASTO`/`DOCID`/`CF`/`TARGA`). Complementare al percorso Gemini raccomandato in
 `CONTRIBUTING.md`, non sostitutivo. Nessun impatto sul training.
+## 2026-07-31 — Esempi con checksum non validi + fix smoke test
+
+Gli esempi CF/PIVA nella documentazione non superavano i validatori del progetto
+(`cf_ok`/`piva_ok`), in contraddizione con il claim "checksum matematicamente validi".
+
+- **CF `RSSMRA85H12F205Z` → `RSSMRA85H12F205Y`** e **`RSSMRA85M01H501Z` → `RSSMRA85M01H501Q`**:
+  cifre di controllo ricalcolate con l'algoritmo ufficiale (le vecchie fallivano `cf_ok`).
+- **PIVA `12345678901` → `12345678903`**: la vecchia falliva `piva_ok` e, essendo il detector
+  PIVA `strict=True`, **non sarebbe stata anonimizzata** dalla rete regex se presentata in un
+  testo (l'avrebbe presa solo il modello).
+- **`smoke_app.py`**: `r["censored_text"]` → `r["anonymized_text"]` (chiave reale di `analyze()`;
+  lo smoke test crashava con KeyError).
+- Aggiornati README, docs/TASSONOMIA_TAG.md, docs/FORMATO_DATI.md, docs/index.html,
+  report/rizzo-pii.typ. Il PDF compilato (`report/rizzo-pii-report.pdf`) va rigenerato con typst.
+
+Nessun impatto su training e pipeline dati.
 
 ---
 
