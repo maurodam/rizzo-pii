@@ -20,6 +20,68 @@ troppo largo. Ora ogni voce della tabella del **Dizionario reversibile** ha il p
   così i placeholder del PDF coincidono con quelli a video.
 - Con il **dizionario disattivato** non si può: la risposta non contiene i valori, per scelta.
 - Test: `tests/test_keep_values.py`.
+## 2026-10-22 — Il PDF protetto da password si riconosce già al caricamento (`app.py`)
+
+Completa la voce del 2026-09-25: lì il server rispondeva già col messaggio chiaro, ma
+appena si trascinava o sceglieva il file l'UI diceva solo "Anteprima del PDF non
+disponibile", teneva il file e lasciava premere "Anonimizza" per ricevere l'errore dopo.
+Ora `_text_from_bytes()` alza `PdfLocked` (sottoclasse di `ValueError`, quindi le altre vie
+non cambiano) e `/preview` lo segnala con `"code": "pdf_locked"`: l'UI lo riconosce dal
+codice e non dal testo, che è solo in italiano, avvisa nella lingua scelta e toglie il file
+dalla dropzone. Test in `tests/test_pdf_protetto.py`.
+
+Nella stessa passata, la pillola dello zoom (voce sotto) resta ferma a destra anche
+scorrendo in orizzontale una pagina ingrandita (`left:0` sullo sticky): prima scorreva via
+insieme alla pagina.
+
+---
+
+## 2026-10-22 — anteprima PDF: zoom sulle pagine ([issue #92](https://github.com/Rizzo-AI-Academy/rizzo-pii/issues/92))
+
+Le due colonne di anteprima PDF (documento originale e "PDF censurato") mostravano le pagine
+sempre alla stessa dimensione: su un documento con testo piccolo o un layout denso (moduli,
+tabelle) non c'era modo di ingrandire per verificare cosa fosse stato anonimizzato senza
+scaricare il file. Aggiunta una barra di zoom (`−`/`+`/percentuale, che resetta a 100%) sticky
+in alto a destra di ciascuna anteprima, più `Ctrl`/`Cmd` + rotellina come scorciatoia; le due
+colonne zoomano in modo indipendente, dal 50% al 300%. Puro frontend: le pagine restano le
+stesse PNG renderizzate server-side, lo zoom è solo CSS (`width` della pagina in funzione di
+una custom property `--z`) — nessuna modifica al backend, nessun modello coinvolto.
+
+---
+
+## 2026-09-25 — Su Windows il drag & drop dei file non funzionava (`tauri/src-tauri/src/lib.rs`)
+
+Issue #96. La dropzone è HTML5 (`drop.addEventListener('drop', ...)` in `app.py`), ma la
+finestra principale nasceva col gestore nativo di drag & drop di Tauri attivo, che su
+Windows si prende i file trascinati: l'evento non arriva mai alla pagina. La documentazione
+di `WebviewWindowBuilder::disable_drag_drop_handler()` lo dice testualmente: *"This is
+required to use HTML5 drag and drop APIs on the frontend on Windows."* L'app non usa gli
+eventi di drop di Tauri, quindi disattivarlo non toglie niente. La chiamata va in tutti e
+due i punti che creano la finestra (avvio e "Salva e riprova" dello splash).
+
+Provato sull'app vera, build di debug su Windows 11 con il backend e il modello v1.5.0: un
+trascinamento OLE di un PDF sulla dropzone, lo stesso meccanismo di Esplora risorse,
+ripetuto tre volte per build. Con `main` il drop viene accettato da Tauri e la pagina non
+riceve niente (0 anteprime su 3); con la correzione il file arriva, parte `POST /preview` e
+il PDF compare nell'anteprima (3 su 3). Non provato su macOS e Linux: la issue riguarda
+Windows 11.
+
+---
+
+## 2026-09-25 — Un PDF protetto da password rispondeva "document closed or encrypted" (`app.py`)
+
+`pdf_export` aveva già il messaggio chiaro, ma l'estrazione del testo fallisce prima: con un
+PDF che chiede la password di apertura `/analyze`, `/pdf` e `/pdf/preview` rispondevano
+l'errore grezzo di PyMuPDF, e l'UI lo mostrava così com'era premendo "Anonimizza".
+`_text_from_bytes()`, da cui passano tutte e quattro le vie, controlla `needs_pass` appena
+aperto il documento e risponde *"PDF protetto da password: rimuovi la protezione e
+riprova."*, lo stesso testo di `pdf_export`. Un PDF con la sola password del proprietario
+(stampa o copia bloccate) si apre come prima. Al caricamento l'anteprima continua a dire
+"Anteprima del PDF non disponibile": è il messaggio generico che l'UI dà a ogni errore di
+`/preview`. Test: `tests/test_pdf_protetto.py`.
+
+---
+
 ## 2026-09-01 — PDF fillable: i campi modulo entrano in `/analyze` (`pdf_text.py`)
 
 `_text_from_bytes` leggeva solo `page.get_text()`. Nei PDF con AcroForm (moduli
